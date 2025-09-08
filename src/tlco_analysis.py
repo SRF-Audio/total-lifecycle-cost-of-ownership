@@ -64,47 +64,56 @@ def infer_annual_depreciation_rate(
 ) -> float:
     """
     Priority:
-      1) If annual_depreciation_pct is provided -> use it (as negative).
-      2) Else if total_depreciation_pct_over_horizon is provided -> annualize it.
-      3) Else infer from quotes.
-      4) Else segment default.
-    Returns negative fraction per year (e.g., -0.0652 for -6.52%/yr).
+      1) annual_depreciation_pct (if provided): use as a NEGATIVE per-year fraction (e.g., 0.11 → -0.11).
+      2) total_depreciation_pct_over_horizon (if provided): annualize to a NEGATIVE per-year fraction.
+      3) quotes: infer from msrp vs current_resale on latest model_year.
+      4) segment default: return -abs(default_rate_by_segment).
     """
     try:
-        # 1) Direct annual %
+        # 1) Explicit annual percent
         ann = pct_to_fraction(annual_depreciation_pct)
         if ann is not None and ann > 0:
-            return -ann
+            rate = -abs(ann)
+            logger.info("Dep: using explicit annual %.2f%%/yr", rate * -100.0)
+            return rate
 
         # 2) Total % over horizon
         tot = pct_to_fraction(total_depreciation_pct_over_horizon)
         if tot is not None and tot > 0 and horizon_years > 0:
-            return annualize_rate(tot, horizon_years)
+            rate = annualize_rate(tot, horizon_years)
+            logger.info(
+                "Dep: using total %.2f%% over %d yrs -> %.2f%%/yr",
+                tot * 100.0, horizon_years, rate * 100.0
+            )
+            return rate
 
         # 3) Quotes
         if quotes:
             best, best_model_year = None, -1
             for q in quotes:
                 if "msrp" in q and "current_resale" in q and "model_year" in q:
-                    if q["model_year"] > best_model_year:
-                        best, best_model_year = q, q["model_year"]
+                    if int(q["model_year"]) > best_model_year:
+                        best, best_model_year = q, int(q["model_year"])
             if best:
-                msrp = float(best["msrp"]); resale = float(best["current_resale"]); model_year = int(best["model_year"])
-                age_years = max(1.0, float(get_value(best, "age_years", 2025 - model_year)))
-                if resale <= 0 or msrp <= 0:
-                    raise ValueError("Invalid quote numbers.")
-                total_dep_fraction = clamp((msrp - resale) / msrp, 0.0, 0.999999)
-                rate = annualize_rate(total_dep_fraction, age_years)
-                logger.info("Inferred depreciation from %s: %.2f%%/yr", model_year, rate * 100.0)
-                return rate
+                msrp = float(best["msrp"]); resale = float(best["current_resale"])
+                if resale > 0 and msrp > 0:
+                    age_years = max(1.0, float(get_value(best, "age_years", 2025 - best_model_year)))
+                    total_dep_fraction = clamp((msrp - resale) / msrp, 0.0, 0.999999)
+                    rate = annualize_rate(total_dep_fraction, age_years)
+                    logger.info(
+                        "Dep: inferred from quote %s (age≈%.1f): total %.2f%% -> %.2f%%/yr",
+                        best_model_year, age_years, total_dep_fraction * 100.0, rate * 100.0
+                    )
+                    return rate
 
-        # 4) Segment default
-        logger.info("Using default segment depreciation rate: %.2f%%/yr", default_rate_by_segment * 100)
-        return -abs(default_rate_by_segment)
+        # 4) Default
+        rate = -abs(float(default_rate_by_segment))
+        logger.info("Dep: using segment default %.2f%%/yr", rate * -100.0)
+        return rate
     except Exception as e:
         logger.error("infer_annual_depreciation_rate failed: %s", e)
-        return -abs(default_rate_by_segment)
-
+        return -abs(float(default_rate_by_segment))
+    
 def project_resale_value(purchase_price: float, annual_dep_rate: float, years: int) -> float:
     try:
         years = max(0, int(years))
@@ -309,14 +318,14 @@ def npv(cash_flows_by_year: List[float], discount_rate: float) -> float:
 def compute_tlco_for_option(option: Dict[str, Any], horizon_years: int) -> Dict[str, Any]:
     """Compute TLCO components for one vehicle option.
 
-    NOTE: financing_interest_total now reflects ONLY the interest paid
-    within the analysis horizon (min(horizon_years, loan term)), not
-    the full-term loan interest.
+    Notes:
+      - financing_interest_total reflects ONLY interest paid within min(horizon, loan term).
+      - depreciation selection logs the branch used (annual, total-over-horizon, quotes, or default).
     """
     try:
-        # ---- local helpers (kept here for drop-in) ----
+        # ---- local helper (for drop-in) -------------------------------------
         def _interest_paid_over_months(P: float, apr: float, term_months: int, months_to_count: int) -> float:
-            """Sum interest from a standard amortized loan over the first `months_to_count` months."""
+            """Sum interest on a standard amortized loan over the first `months_to_count` months."""
             try:
                 P = max(0.0, float(P))
                 tm = int(max(0, term_months))
@@ -329,7 +338,6 @@ def compute_tlco_for_option(option: Dict[str, Any], horizon_years: int) -> Dict[
                 r = r_annual / 12.0
                 if r == 0.0:
                     return 0.0
-                # Monthly payment
                 m = P * (r * (1 + r) ** tm) / ((1 + r) ** tm - 1)
                 bal = P
                 interest_sum = 0.0
@@ -341,7 +349,7 @@ def compute_tlco_for_option(option: Dict[str, Any], horizon_years: int) -> Dict[
                 return max(0.0, interest_sum)
             except Exception:
                 return 0.0
-        # ------------------------------------------------
+        # ---------------------------------------------------------------------
 
         year = int(get_value(option, "year", 0) or 0)
         make = get_value(option, "make", "Unknown")
@@ -375,15 +383,15 @@ def compute_tlco_for_option(option: Dict[str, Any], horizon_years: int) -> Dict[
         reliability_score = option.get("reliability_score_out_of_5")
         safety_rating = option.get("safety_rating_out_of_5")
 
-        # Depreciation
+        # Depreciation (robust + logged)
         segment_default_dep = float(get_value(option, "segment_default_dep_rate", 0.12))
 
         annual_dep_rate = infer_annual_depreciation_rate(
             purchase_price=purchase_price,
             quotes=option.get("depreciation_quotes"),
             default_rate_by_segment=segment_default_dep,
-            annual_depreciation_pct=option.get("annual_depreciation_pct"),  # e.g., 6.5
-            total_depreciation_pct_over_horizon=option.get("total_depreciation_pct_over_horizon"),  # e.g., 30
+            annual_depreciation_pct=option.get("annual_depreciation_pct"),
+            total_depreciation_pct_over_horizon=option.get("total_depreciation_pct_over_horizon"),
             horizon_years=horizon_years,
         )
 
@@ -410,18 +418,16 @@ def compute_tlco_for_option(option: Dict[str, Any], horizon_years: int) -> Dict[
         # Reliability contingency
         reliability_contingency = compute_reliability_risk_premium(reliability_score, safety_rating, annual_miles, horizon_years)
 
-        # Financing — corrected to count only interest within horizon
+        # Financing — only interest within horizon
         financed_amount = float(get_value(option, "amount_financed", 0.0))
         apr = float(get_value(option, "apr", 0.0))
 
-        # Accept either years or months (months wins if provided)
         term_years_in = int(get_value(option, "loan_term_years", 0) or 0)
         term_months_in = int(get_value(option, "loan_term_months", 0) or 0)
-
         if term_months_in > 0:
             term_months = term_months_in
         else:
-            # Guard: if someone mistakenly passes months into years (>=36 is a strong tell for auto loans), treat as months.
+            # Guard: if years looks like months (>=36), treat as months; else convert years → months
             term_months = term_years_in if term_years_in >= 36 else term_years_in * 12
 
         months_to_count = min(max(0, term_months), max(0, horizon_years) * 12)
@@ -431,7 +437,7 @@ def compute_tlco_for_option(option: Dict[str, Any], horizon_years: int) -> Dict[
         total_operating = sum(fuel_costs) + sum(insurance_costs) + sum(maintenance_costs) + sum(consumable_costs) + sum(registration_costs)
         total_cost = purchase_price + upfront + total_operating + reliability_contingency + financing_total_interest - resale_after_horizon
 
-        # Optional NPV (operating only, unchanged behavior)
+        # Optional NPV (operating only, unchanged)
         discount_rate = float(get_value(option, "discount_rate", 0.0))
         if discount_rate > 0:
             operating_npv = npv(
@@ -454,7 +460,7 @@ def compute_tlco_for_option(option: Dict[str, Any], horizon_years: int) -> Dict[
             "consumables_total": round(sum(consumable_costs), 2),
             "registration_total": round(sum(registration_costs), 2),
             "reliability_contingency": round(reliability_contingency, 2),
-            "financing_interest_total": round(financing_total_interest, 2),   # <-- corrected
+            "financing_interest_total": round(financing_total_interest, 2),
             "operating_total": round(total_operating, 2),
             "tlco_total_cash": round(total_cost, 2),
             "operating_npv_at_discount_rate": round(operating_npv, 2) if operating_npv is not None else None,
@@ -462,7 +468,7 @@ def compute_tlco_for_option(option: Dict[str, Any], horizon_years: int) -> Dict[
     except Exception as e:
         logger.exception("compute_tlco_for_option failed for option=%s", option)
         return {"error": str(e), "id": option.get("trim", "unknown")}
-
+    
 def compute_tlco(input_json: Dict[str, Any], log_path: str) -> pd.DataFrame:
     """Compute TLCO for all options and return a DataFrame."""
     setup_logging(log_path)
