@@ -172,29 +172,31 @@ def compute_insurance_cost(annual_premium: float) -> float:
         logger.error("compute_insurance_cost failed: %s", e)
         return 0.0
 
-def compute_annual_maintenance_cost(year_index: int, maintenance_schedule: List[Dict[str, Any]], annual_miles: float) -> float:
+def compute_annual_maintenance_cost(year_index: int, maintenance_schedule, annual_miles: float) -> float:
     """
-    Trigger tasks by miles or years for this specific year.
-    A task fires if:
-      - year_index is a multiple of interval_years, or
-      - cumulative miles crossed a new multiple of interval_miles this year.
+    Fires tasks by (a) year multiples and (b) every crossing of interval_miles.
+    Counts multiple mile-based events in a single year if you cross multiple thresholds.
     """
     try:
         total = 0.0
-        cum_miles = annual_miles * year_index
+        prev_miles = annual_miles * (year_index - 1)
+        cum_miles  = annual_miles * year_index
         for item in maintenance_schedule or []:
             cost = float(get_value(item, "cost", 0.0))
-            im = float(get_value(item, "interval_miles", 0.0) or 0.0)
-            iy = float(get_value(item, "interval_years", 0.0) or 0.0)
-            triggered = False
+            im   = float(get_value(item, "interval_miles", 0.0) or 0.0)
+            iy   = float(get_value(item, "interval_years", 0.0) or 0.0)
+
+            # Year-based maintenance
             if iy and iy > 0 and (year_index % int(iy) == 0):
-                triggered = True
-            if im and im > 0 and cum_miles > 0:
-                prev = int(annual_miles * (year_index - 1))
-                if int(cum_miles) // int(im) == (prev // int(im)) + 1:
-                    triggered = True
-            if triggered:
                 total += cost
+
+            # Miles-based maintenance (count all crossings this year)
+            if im and im > 0:
+                prev_k = int(prev_miles // im)
+                curr_k = int(cum_miles  // im)
+                crossings = curr_k - prev_k
+                if crossings > 0:
+                    total += cost * crossings
         return total
     except Exception as e:
         logger.error("compute_annual_maintenance_cost failed: %s", e)
