@@ -359,6 +359,9 @@ def compute_tlco_for_option(option: Dict[str, Any], horizon_years: int) -> Dict[
         model = get_value(option, "model", "Unknown")
         trim = get_value(option, "trim", "Unknown")
         identifier = f"{year} {make} {model} {trim}"
+        vin = get_value(option, "vin", "")
+        url = get_value(option, "url", "")
+        starting_mileage = float(get_value(option, "starting_mileage", 0.0))
 
         purchase_price = float(get_value(option, "purchase_price", 0.0) or 0.0)
         tax_rate = float(get_value(option, "tax_rate", 0.0))
@@ -456,7 +459,7 @@ def compute_tlco_for_option(option: Dict[str, Any], horizon_years: int) -> Dict[
 
         return {
             "id": identifier,
-            "year": year, "make": make, "model": model, "trim": trim,
+            "year": year, "make": make, "model": model, "trim": trim, "vin": vin, "url": url, "starting_mileage": starting_mileage,
             "purchase_price": round(purchase_price, 2),
             "upfront_tax_and_fees": round(upfront, 2),
             "annual_dep_rate_pct": round(annual_dep_rate * 100.0, 2),
@@ -596,7 +599,7 @@ def compute_tlco(input_json: Dict[str, Any], log_path: str) -> pd.DataFrame:
             "consumables_total","registration_total",
             "reliability_contingency","financing_interest_total",
             "operating_total","operating_npv_at_discount_rate",
-            "year","make","model","trim",
+            "year","make","model","trim", "vin","url","starting_mileage",
         ]
         cols = [c for c in ordering if c in df.columns] + [c for c in df.columns if c not in ordering]
         return df[cols]

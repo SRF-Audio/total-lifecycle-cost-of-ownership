@@ -26,9 +26,10 @@ def main():
         csv_path = outdir / "results.csv"
         df.to_csv(csv_path, index=False)
 
-        # Mirror JSON for programmatic use
+        # Mirror JSON for programmatic use — avoid escaped slashes in URLs
         json_path = outdir / "results.json"
-        json_path.write_text(df.to_json(orient="records", indent=2))
+        records = df.to_dict(orient="records")
+        json_path.write_text(json.dumps(records, ensure_ascii=False, indent=2))
 
         print(f"Wrote: {csv_path}")
         print(f"Wrote: {json_path}")
