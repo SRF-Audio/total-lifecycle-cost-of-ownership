@@ -1,0 +1,8 @@
+services:
+  tlco:
+    build: .
+    image: tlco:latest
+    container_name: tlco
+    volumes:
+      - ./:/work
+    restart: "no"
