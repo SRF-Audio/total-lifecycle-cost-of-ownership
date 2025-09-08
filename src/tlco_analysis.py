@@ -323,6 +323,7 @@ def compute_tlco_for_option(option: Dict[str, Any], horizon_years: int) -> Dict[
     Notes:
       - financing_interest_total reflects ONLY interest paid within min(horizon, loan term).
       - depreciation selection logs the branch used (annual, total-over-horizon, quotes, or default).
+      - like_rating (1..5, optional) is carried through for downstream ranking influence only.
     """
     try:
         # ---- local helper (for drop-in) -------------------------------------
@@ -384,6 +385,10 @@ def compute_tlco_for_option(option: Dict[str, Any], horizon_years: int) -> Dict[
         # Reliability & safety
         reliability_score = option.get("reliability_score_out_of_5")
         safety_rating = option.get("safety_rating_out_of_5")
+
+        # User preference (car "like") for later ranking
+        like_rating = option.get("like_rating")  # expected 1..5; optional
+        like_weight_override = option.get("like_weight_dollars_per_point")  # optional per-option override
 
         # Depreciation (robust + logged)
         segment_default_dep = float(get_value(option, "segment_default_dep_rate", 0.12))
@@ -466,29 +471,132 @@ def compute_tlco_for_option(option: Dict[str, Any], horizon_years: int) -> Dict[
             "operating_total": round(total_operating, 2),
             "tlco_total_cash": round(total_cost, 2),
             "operating_npv_at_discount_rate": round(operating_npv, 2) if operating_npv is not None else None,
+            # New: carry through preference info for ranking stage
+            "like_rating": like_rating,
+            "like_weight_dollars_per_point": like_weight_override,
         }
     except Exception as e:
         logger.exception("compute_tlco_for_option failed for option=%s", option)
         return {"error": str(e), "id": option.get("trim", "unknown")}
-    
+
+def compute_rank_score(
+    tlco_total_cash: float,
+    like_rating: Optional[float],
+    dollars_per_point: float = 400.0,
+    neutral_like: float = 3.0,
+) -> float:
+    """
+    Return a composite score used *only* for sorting:
+      rank_score = TLCO - (like_delta * dollars_per_point)
+
+    Where:
+      - TLCO is the computed total lifecycle cash cost (lower is better).
+      - like_rating is a 1..5 user preference (5=love, 1=dislike).
+      - dollars_per_point is how much a single like-point is allowed to
+        'behave like' in dollars (default $400).
+      - neutral_like (3) means no effect; 5 reduces the score by 2 * dollars_per_point.
+
+    This keeps TLCO primary while allowing a bounded, transparent nudge.
+    """
+    try:
+        tlco = float(tlco_total_cash)
+        dpp = max(0.0, float(dollars_per_point))
+        if like_rating is None:
+            like = neutral_like
+        else:
+            like = clamp(float(like_rating), 1.0, 5.0)
+        like_delta = like - float(neutral_like)
+        return tlco - (like_delta * dpp)
+    except Exception as e:
+        logger.error("compute_rank_score failed: %s", e)
+        return float(tlco_total_cash)
+
+
 def compute_tlco(input_json: Dict[str, Any], log_path: str) -> pd.DataFrame:
-    """Compute TLCO for all options and return a DataFrame."""
+    """Compute TLCO for all options and return a sorted DataFrame.
+
+    Sorting:
+      Primary key is a composite 'rank_score' that keeps TLCO primary while
+      allowing a bounded nudge from a 1..5 'like_rating'. Lower is better.
+
+    Configuration:
+      - input_json["like_weight_dollars_per_point"] (float, default 400.0)
+        controls how strong the like influence is. A 2-point advantage at
+        $400/pt equals an $800 TLCO nudge (e.g., can flip $45,000 vs $45,700,
+        but not $45,000 vs $50,000).
+
+    Output (added):
+      - like_weight_dollars_per_point: the effective weight used for that row
+        (per-option override if provided, otherwise the global default).
+      - like_adjustment_dollars: (like - 3.0) * like_weight_dollars_per_point.
+        rank_score = tlco_total_cash - like_adjustment_dollars.
+    """
     setup_logging(log_path)
     try:
         horizon_years = int(get_value(input_json, "horizon_years", 7))
         options = get_value(input_json, "options", [])
+        like_weight_default = float(get_value(input_json, "like_weight_dollars_per_point", 400.0))
+
         results: List[Dict[str, Any]] = []
         for opt in options:
             results.append(compute_tlco_for_option(opt, horizon_years))
+
         df = pd.DataFrame(results)
+
+        # Ensure required columns exist even if errors/empties
+        if "tlco_total_cash" not in df.columns:
+            df["tlco_total_cash"] = pd.NA
+        if "like_rating" not in df.columns:
+            df["like_rating"] = pd.NA
+        if "like_weight_dollars_per_point" not in df.columns:
+            df["like_weight_dollars_per_point"] = pd.NA
+
+        # Clean/normalize like inputs & compute rank_score
+        # - like defaults to 3 (neutral), clipped [1,5]
+        like = df["like_rating"].fillna(3.0).astype(float).clip(1.0, 5.0)
+        # - weight uses per-option override when present; otherwise global default; clipped to >= 0
+        weight = (
+            df["like_weight_dollars_per_point"]
+            .fillna(like_weight_default)
+            .astype(float)
+            .clip(lower=0.0)
+        )
+        neutral_like = 3.0
+        like_adjustment = (like - neutral_like) * weight
+
+        # Persist effective values so they appear in outputs
+        df["like_weight_dollars_per_point"] = weight.round(2)
+        df["like_adjustment_dollars"] = like_adjustment.round(2)
+
+        # Compute rank_score (lower is better)
+        df["rank_score"] = df["tlco_total_cash"].astype(float) - like_adjustment
+
+        # Sort with stable mergesort so previously-equal items keep order
+        df = df.sort_values(
+            by=["rank_score", "tlco_total_cash", "like_rating"],
+            ascending=[True, True, False],
+            kind="mergesort",
+        ).reset_index(drop=True)
+
+        # 1-based rank index for quick reading
+        df["sort_rank"] = (df.index + 1).astype(int)
+
+        # Column ordering (keep original order, surface new fields near TLCO)
         ordering = [
-            "id","purchase_price","upfront_tax_and_fees",
+            "sort_rank",
+            "id",
+            "tlco_total_cash",
+            "rank_score",
+            "like_rating",
+            "like_weight_dollars_per_point",
+            "like_adjustment_dollars",
+            "purchase_price","upfront_tax_and_fees",
             "annual_dep_rate_pct","projected_resale_value",
             "fuel_total","insurance_total","maintenance_total",
             "consumables_total","registration_total",
             "reliability_contingency","financing_interest_total",
-            "operating_total","tlco_total_cash",
-            "operating_npv_at_discount_rate"
+            "operating_total","operating_npv_at_discount_rate",
+            "year","make","model","trim",
         ]
         cols = [c for c in ordering if c in df.columns] + [c for c in df.columns if c not in ordering]
         return df[cols]
