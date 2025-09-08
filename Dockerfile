@@ -10,4 +10,5 @@ COPY app/ app/
 
 # Run the CLI: reads /work/cars.json, writes to /work/data (mounted via compose)
 ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app
 ENTRYPOINT ["python", "app/main.py", "--cars", "/work/cars.json", "--outdir", "/work/data"]

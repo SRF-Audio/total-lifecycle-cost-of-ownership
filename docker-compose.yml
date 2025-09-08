@@ -1,8 +1,10 @@
+# docker-compose.yml
 services:
   tlco:
     build: .
     image: tlco:latest
     container_name: tlco
     volumes:
-      - ./:/work
+      - ./:/work:Z
     restart: "no"
+    user: "${UID}:${GID}"

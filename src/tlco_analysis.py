@@ -31,6 +31,17 @@ def clamp(value: float, min_v: float, max_v: float) -> float:
         return max_v
     return value
 
+def pct_to_fraction(p: Optional[float]) -> Optional[float]:
+    if p is None:
+        return None
+    try:
+        v = float(p)
+        # Accept percent like 6.5 and fraction like 0.065
+        return v/100.0 if v > 1.0 else v
+    except:
+        return None
+
+
 def annualize_rate(total_rate: float, years: float) -> float:
     """Convert total depreciation fraction over 'years' to annualized compound rate (negative)."""
     try:
@@ -43,12 +54,34 @@ def annualize_rate(total_rate: float, years: float) -> float:
         logger.error("annualize_rate failed: %s", e)
         return -total_rate / max(years, 1.0)
 
-def infer_annual_depreciation_rate(purchase_price: float, quotes: Optional[List[Dict[str, Any]]], default_rate_by_segment: float) -> float:
+def infer_annual_depreciation_rate(
+    purchase_price: float,
+    quotes: Optional[List[Dict[str, Any]]],
+    default_rate_by_segment: float,
+    annual_depreciation_pct: Optional[float] = None,
+    total_depreciation_pct_over_horizon: Optional[float] = None,
+    horizon_years: int = 7,
+) -> float:
     """
-    Estimate annual depreciation from provided quotes (msrp/current_resale/model_year/age_years),
-    otherwise fall back to a segment default. Returns negative fraction per year.
+    Priority:
+      1) If annual_depreciation_pct is provided -> use it (as negative).
+      2) Else if total_depreciation_pct_over_horizon is provided -> annualize it.
+      3) Else infer from quotes.
+      4) Else segment default.
+    Returns negative fraction per year (e.g., -0.0652 for -6.52%/yr).
     """
     try:
+        # 1) Direct annual %
+        ann = pct_to_fraction(annual_depreciation_pct)
+        if ann is not None and ann > 0:
+            return -ann
+
+        # 2) Total % over horizon
+        tot = pct_to_fraction(total_depreciation_pct_over_horizon)
+        if tot is not None and tot > 0 and horizon_years > 0:
+            return annualize_rate(tot, horizon_years)
+
+        # 3) Quotes
         if quotes:
             best, best_model_year = None, -1
             for q in quotes:
@@ -64,10 +97,13 @@ def infer_annual_depreciation_rate(purchase_price: float, quotes: Optional[List[
                 rate = annualize_rate(total_dep_fraction, age_years)
                 logger.info("Inferred depreciation from %s: %.2f%%/yr", model_year, rate * 100.0)
                 return rate
+
+        # 4) Segment default
         logger.info("Using default segment depreciation rate: %.2f%%/yr", default_rate_by_segment * 100)
         return -abs(default_rate_by_segment)
     except Exception as e:
-        logger.error("infer_annual_depreciation_rate failed: %s", e); return -abs(default_rate_by_segment)
+        logger.error("infer_annual_depreciation_rate failed: %s", e)
+        return -abs(default_rate_by_segment)
 
 def project_resale_value(purchase_price: float, annual_dep_rate: float, years: int) -> float:
     try:
@@ -236,12 +272,25 @@ def compute_reliability_risk_premium(reliability_score_out_of_5: Optional[float]
         return 0.0
 
 def compute_financing_cost(amount_financed: float, apr: float, term_years: int) -> float:
-    """Simple interest approximation (conservative)."""
+    """Total interest paid on an amortized loan."""
     try:
-        principal = max(0.0, float(amount_financed))
-        apr = max(0.0, float(apr))
-        years = max(0, int(term_years))
-        return principal * apr * years
+        P = max(0.0, float(amount_financed))
+        r_annual = max(0.0, float(apr))
+        # Accept either fraction (0.0699) or percent (6.99)
+        if r_annual > 1.0:
+            r_annual = r_annual / 100.0
+        n_years = max(0, int(term_years))
+        n = n_years * 12
+        if P == 0.0 or n == 0:
+            return 0.0
+        if r_annual == 0.0:
+            # zero-interest promo
+            return 0.0
+        r = r_annual / 12.0
+        # Monthly payment
+        m = P * (r * (1 + r)**n) / ((1 + r)**n - 1)
+        total_paid = m * n
+        return max(0.0, total_paid - P)
     except Exception as e:
         logger.error("compute_financing_cost failed: %s", e)
         return 0.0
@@ -258,8 +307,42 @@ def npv(cash_flows_by_year: List[float], discount_rate: float) -> float:
         return sum(cash_flows_by_year or [])
 
 def compute_tlco_for_option(option: Dict[str, Any], horizon_years: int) -> Dict[str, Any]:
-    """Compute TLCO components for one vehicle option."""
+    """Compute TLCO components for one vehicle option.
+
+    NOTE: financing_interest_total now reflects ONLY the interest paid
+    within the analysis horizon (min(horizon_years, loan term)), not
+    the full-term loan interest.
+    """
     try:
+        # ---- local helpers (kept here for drop-in) ----
+        def _interest_paid_over_months(P: float, apr: float, term_months: int, months_to_count: int) -> float:
+            """Sum interest from a standard amortized loan over the first `months_to_count` months."""
+            try:
+                P = max(0.0, float(P))
+                tm = int(max(0, term_months))
+                mc = int(max(0, months_to_count))
+                if P <= 0.0 or tm == 0 or mc == 0:
+                    return 0.0
+                r_annual = float(apr)
+                if r_annual > 1.0:
+                    r_annual /= 100.0
+                r = r_annual / 12.0
+                if r == 0.0:
+                    return 0.0
+                # Monthly payment
+                m = P * (r * (1 + r) ** tm) / ((1 + r) ** tm - 1)
+                bal = P
+                interest_sum = 0.0
+                for _ in range(min(mc, tm)):
+                    interest = bal * r
+                    principal = m - interest
+                    bal -= principal
+                    interest_sum += interest
+                return max(0.0, interest_sum)
+            except Exception:
+                return 0.0
+        # ------------------------------------------------
+
         year = int(get_value(option, "year", 0) or 0)
         make = get_value(option, "make", "Unknown")
         model = get_value(option, "model", "Unknown")
@@ -294,8 +377,16 @@ def compute_tlco_for_option(option: Dict[str, Any], horizon_years: int) -> Dict[
 
         # Depreciation
         segment_default_dep = float(get_value(option, "segment_default_dep_rate", 0.12))
-        prior_quotes = option.get("depreciation_quotes")
-        annual_dep_rate = infer_annual_depreciation_rate(purchase_price, prior_quotes, segment_default_dep)
+
+        annual_dep_rate = infer_annual_depreciation_rate(
+            purchase_price=purchase_price,
+            quotes=option.get("depreciation_quotes"),
+            default_rate_by_segment=segment_default_dep,
+            annual_depreciation_pct=option.get("annual_depreciation_pct"),  # e.g., 6.5
+            total_depreciation_pct_over_horizon=option.get("total_depreciation_pct_over_horizon"),  # e.g., 30
+            horizon_years=horizon_years,
+        )
+
         resale_after_horizon = project_resale_value(purchase_price, annual_dep_rate, horizon_years)
 
         # Up-front taxes & fees
@@ -319,17 +410,28 @@ def compute_tlco_for_option(option: Dict[str, Any], horizon_years: int) -> Dict[
         # Reliability contingency
         reliability_contingency = compute_reliability_risk_premium(reliability_score, safety_rating, annual_miles, horizon_years)
 
-        # Financing (optional)
+        # Financing — corrected to count only interest within horizon
         financed_amount = float(get_value(option, "amount_financed", 0.0))
         apr = float(get_value(option, "apr", 0.0))
-        term_years = int(get_value(option, "loan_term_years", 0) or 0)
-        financing_total_interest = compute_financing_cost(financed_amount, apr, term_years)
+
+        # Accept either years or months (months wins if provided)
+        term_years_in = int(get_value(option, "loan_term_years", 0) or 0)
+        term_months_in = int(get_value(option, "loan_term_months", 0) or 0)
+
+        if term_months_in > 0:
+            term_months = term_months_in
+        else:
+            # Guard: if someone mistakenly passes months into years (>=36 is a strong tell for auto loans), treat as months.
+            term_months = term_years_in if term_years_in >= 36 else term_years_in * 12
+
+        months_to_count = min(max(0, term_months), max(0, horizon_years) * 12)
+        financing_total_interest = _interest_paid_over_months(financed_amount, apr, term_months, months_to_count)
 
         # Sum
         total_operating = sum(fuel_costs) + sum(insurance_costs) + sum(maintenance_costs) + sum(consumable_costs) + sum(registration_costs)
         total_cost = purchase_price + upfront + total_operating + reliability_contingency + financing_total_interest - resale_after_horizon
 
-        # Optional NPV
+        # Optional NPV (operating only, unchanged behavior)
         discount_rate = float(get_value(option, "discount_rate", 0.0))
         if discount_rate > 0:
             operating_npv = npv(
@@ -352,7 +454,7 @@ def compute_tlco_for_option(option: Dict[str, Any], horizon_years: int) -> Dict[
             "consumables_total": round(sum(consumable_costs), 2),
             "registration_total": round(sum(registration_costs), 2),
             "reliability_contingency": round(reliability_contingency, 2),
-            "financing_interest_total": round(financing_total_interest, 2),
+            "financing_interest_total": round(financing_total_interest, 2),   # <-- corrected
             "operating_total": round(total_operating, 2),
             "tlco_total_cash": round(total_cost, 2),
             "operating_npv_at_discount_rate": round(operating_npv, 2) if operating_npv is not None else None,

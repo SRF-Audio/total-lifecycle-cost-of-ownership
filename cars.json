@@ -2,21 +2,21 @@
   "horizon_years": 3,
   "options": [
     {
-      "year": 2024,
+      "year": 2025,
       "make": "Toyota",
       "model": "Sienna",
       "trim": "XSE",
-      "purchase_price": 45000,
+      "purchase_price": 53998,
       "tax_rate": 0.074,
       "doc_and_title_fees": 350,
 
-      "annual_miles": 12000,
+      "annual_miles": 15600,
 
       "fuel_type": "hybrid",
       "mpg": 35,
       "mpge": null,
       "kwh_per_100_miles": null,
-      "gas_price_per_gal": 3.8,
+      "gas_price_per_gal": 3.26,
       "electricity_cost_per_kwh": 0.14,
       "phev_utilization_electric_fraction": 0.6,
 
@@ -44,75 +44,11 @@
       "safety_rating_out_of_5": 5.0,
 
       "segment_default_dep_rate": 0.11,
-      "depreciation_quotes": [
-        {
-          "model_year": 2017,
-          "msrp": 36000,
-          "current_resale": 21000,
-          "age_years": 8
-        }
-      ],
+      "total_depreciation_pct_over_horizon": 25,
 
-      "amount_financed": 0,
-      "apr": 0.0,
-      "loan_term_years": 0,
-
-      "discount_rate": 0.03
-    },
-
-    {
-      "year": 2024,
-      "make": "Hyundai",
-      "model": "Santa Fe Hybrid",
-      "trim": "Limited",
-      "purchase_price": 42000,
-      "tax_rate": 0.074,
-      "doc_and_title_fees": 350,
-
-      "annual_miles": 12000,
-
-      "fuel_type": "hybrid",
-      "mpg": 34,
-      "mpge": null,
-      "kwh_per_100_miles": null,
-      "gas_price_per_gal": 3.8,
-      "electricity_cost_per_kwh": 0.14,
-
-      "insurance_annual_premium": 1550,
-      "registration_annual_fee": 190,
-
-      "maintenance_schedule": [
-        { "name": "oil_change", "interval_miles": 7500, "cost": 80 },
-        { "name": "coolant", "interval_years": 5, "cost": 220 }
-      ],
-
-      "consumables": {
-        "tires": { "miles_per_set": 40000, "cost_per_set": 850 },
-        "brake_pads": {
-          "miles_per_set": 35000,
-          "cost_per_axle": 210,
-          "axles": 2
-        },
-        "wiper_blades": { "replacements_per_year": 2, "cost_per_set": 35 },
-        "aux_12v_battery": { "interval_years": 4, "cost": 200 }
-      },
-
-      "reliability_score_out_of_5": 3.8,
-      "safety_rating_out_of_5": 4.5,
-
-      "segment_default_dep_rate": 0.14,
-      "depreciation_quotes": [
-        {
-          "model_year": 2018,
-          "msrp": 35000,
-          "current_resale": 16000,
-          "age_years": 7
-        }
-      ],
-
-      "amount_financed": 0,
-      "apr": 0.0,
-      "loan_term_years": 0,
+      "amount_financed": 53998,
+      "apr": 0.059,
+      "loan_term_years": 5,
 
       "discount_rate": 0.03
     }
